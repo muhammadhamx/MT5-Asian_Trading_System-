@@ -56,3 +56,9 @@ secrets.*
 # MT5 related (if you keep credentials locally)
 mt5_credentials.json
 mt5_config.*
+
+
+# Other
+*.crt
+*.key
+*.csr
