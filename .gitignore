@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+*.egg
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+*.env
+*.venv
+
+# Django
+db.sqlite3
+*.log
+media/
+staticfiles/
+
+# Jupyter / notebooks (if any analysis done)
+.ipynb_checkpoints
+*.ipynb
+
+# System files
+.DS_Store
+Thumbs.db
+
+# VSCode / IDEs
+.vscode/
+.idea/
+*.swp
+
+# Compiled C extensions
+build/
+dist/
+
+# Coverage / testing
+.coverage
+htmlcov/
+.cache/
+pytest_cache/
+
+# Config / credentials
+*.ini
+*.cfg
+*.json
+*.yaml
+*.yml
+secrets.*
+
+# MT5 related (if you keep credentials locally)
+mt5_credentials.json
+mt5_config.*

@@ -1,0 +1,209 @@
+# =============================================================================
+# MT5 ASIAN LIQUIDITY SWEEP STRATEGY - ENVIRONMENT CONFIGURATION
+# Phase 1-2 Only: Detection and Analysis System
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DJANGO SETTINGS
+# -----------------------------------------------------------------------------
+SECRET_KEY=prod-secure-key-mt5-asian-sweep-strategy-2025-change-this-in-production-deployment-minimum-50-chars
+DEBUG=False
+ALLOWED_HOSTS=localhost,127.0.0.1,testserver,your-production-domain.com
+DJANGO_SETTINGS_MODULE=mt5_drf_project.settings
+
+# Database Configuration
+DATABASE_ENGINE=django.db.backends.sqlite3
+DATABASE_NAME=db.sqlite3
+
+# PRODUCTION SECURITY SETTINGS
+CSRF_TRUSTED_ORIGINS=http://localhost,http://127.0.0.1,https://your-production-domain.com
+SECURE_HSTS_SECONDS=31536000
+SECURE_SSL_REDIRECT=False
+SESSION_COOKIE_SECURE=False
+CSRF_COOKIE_SECURE=False
+
+# -----------------------------------------------------------------------------
+# MT5 CONNECTION SETTINGS
+# -----------------------------------------------------------------------------
+# PRODUCTION: Set USE_MOCK_MT5=True for development, False for real trading
+USE_MOCK_MT5=FALSE
+
+# Real MT5 Connection - PRODUCTION CREDENTIALS REQUIRED
+# IMPORTANT: Replace with real credentials for production deployment
+MT5_LOGIN=96158513
+MT5_PASSWORD=Ml_x6xJb
+MT5_SERVER=MetaQuotes-Demo
+MT5_INVESTOR=-6YwNmNo
+# Name     : TestU QQ
+# Type     : Forex Hedged USD
+# Server   : MetaQuotes-Demo
+# Login    : 96158513
+# Password : Ml_x6xJb
+# Investor : -6YwNmNo
+
+# MT5 Installation Paths (Windows)
+MT5_PATH_1=C:\\Program Files\\MetaTrader 5\\terminal64.exe
+MT5_PATH_2=C:\\Program Files\\MetaTrader 5\\terminal.exe
+MT5_PATH_3=C:\\Program Files (x86)\\MetaTrader 5\\terminal64.exe
+MT5_PATH_4=C:\\Program Files (x86)\\MetaTrader 5\\terminal.exe
+
+# -----------------------------------------------------------------------------
+# TRADING CONFIGURATION
+# -----------------------------------------------------------------------------
+# Default Trading Symbol
+DEFAULT_SYMBOL=XAUUSD
+
+# Enable auto trading by default
+ENABLE_AUTO_TRADING=True
+AUTO_TRADING_INTERVAL=30
+
+# Add this to control test mode for Asian range data
+TEST_MODE_OUTSIDE_ASIAN_RANGE=FALSE
+
+# Asian Session Configuration
+ASIAN_SESSION_START_HOUR=0
+ASIAN_SESSION_END_HOUR=6
+ASIAN_SESSION_TIMEZONE=UTC
+
+# Timeframes
+DEFAULT_TIMEFRAME=M5
+ANALYSIS_TIMEFRAMES=M1,M5,M15,H1,H4,D1
+
+# -----------------------------------------------------------------------------
+# RISK MANAGEMENT & THRESHOLDS
+# -----------------------------------------------------------------------------
+# Pip Values (for different symbols)
+XAUUSD_PIP_VALUE=0.1
+
+# Default risk percentage per trade - Client Spec: 0.5% default, 1% only with bias alignment & normal vol
+DEFAULT_RISK_PERCENTAGE=0.5
+
+# Range Grading Thresholds (in pips) - Client Spec: <30=NO_TRADE, 30-49=TIGHT, 50-150=NORMAL, 151-180=WIDE
+NO_TRADE_RANGE_MAX=30
+TIGHT_RANGE_MAX=49
+NORMAL_RANGE_MAX=150
+WIDE_RANGE_MAX=180
+
+# Risk Multipliers - Client Spec: 0.5% default, 1% only with-bias & normal vol
+NO_TRADE_RISK_MULTIPLIER=0.0
+TIGHT_RANGE_RISK_MULTIPLIER=0.5
+NORMAL_RANGE_RISK_MULTIPLIER=1.0
+WIDE_RANGE_RISK_MULTIPLIER=0.5
+
+# Sweep Detection Thresholds - Client Spec: max(10 pips, 7.5-10% of Asia range, 0.5×ATR(H1))
+SWEEP_THRESHOLD_PIPS=5
+CONFIRMATION_THRESHOLD_PIPS=3
+MIN_SWEEP_THRESHOLD_PIPS=10
+SWEEP_THRESHOLD_PERCENTAGE_MIN=0.075
+SWEEP_THRESHOLD_PERCENTAGE_MAX=0.10
+SWEEP_THRESHOLD_PERCENTAGE_XAUUSD=0.095
+SWEEP_THRESHOLD_ATR_MULTIPLIER=0.5
+RETEST_BAND_PIPS=5
+
+# Spread Gate (maximum allowed spread in pips)
+MAX_SPREAD_PIPS=2.0
+
+# -----------------------------------------------------------------------------
+# MOCK SERVICE CONFIGURATION
+# -----------------------------------------------------------------------------
+# Mock Account Settings
+MOCK_ACCOUNT_LOGIN=12345678
+MOCK_ACCOUNT_PASSWORD=password
+MOCK_ACCOUNT_SERVER=Demo-Server
+MOCK_ACCOUNT_CURRENCY=USD
+MOCK_ACCOUNT_LEVERAGE=100
+MOCK_ACCOUNT_BALANCE=10000.0
+
+# Mock Price Settings
+MOCK_XAUUSD_BASE_PRICE=2000.0
+MOCK_EURUSD_BASE_PRICE=1.1000
+MOCK_GBPUSD_BASE_PRICE=1.3000
+MOCK_USDJPY_BASE_PRICE=110.00
+
+# Mock Asian Range Settings
+MOCK_ASIAN_RANGE_HIGH=2005.0
+MOCK_ASIAN_RANGE_LOW=1995.0
+MOCK_ASIAN_RANGE_PIPS=100
+
+# -----------------------------------------------------------------------------
+# ANALYSIS CONFIGURATION
+# -----------------------------------------------------------------------------
+# Historical Data Periods
+HTF_ANALYSIS_DAYS_D1=60
+HTF_ANALYSIS_DAYS_H4=30
+SMA_PERIOD=20
+
+# Session Management - Client Spec: MaxTrades=2
+MAX_DAILY_SESSIONS=2
+SESSION_TIMEOUT_HOURS=24
+
+# Displacement & Confirmation Parameters - Client Spec: k=1.3 normal, k=1.5 high-vol
+MIN_BODY_SIZE_PERCENTAGE=0.6
+DISPLACEMENT_ATR_MULTIPLIER_NORMAL=1.3
+DISPLACEMENT_ATR_MULTIPLIER_HIGH_VOL=1.5
+RETEST_WINDOW_MINUTES=15
+CONFIRMATION_TIMEOUT_MINUTES=30
+M5_DATA_TIME_RANGE_BASE=20
+M5_DATA_TIME_RANGE_INCREMENT=10
+M5_DATA_MAX_ATTEMPTS=3
+
+# ATR & Volatility Regime Detection
+ATR_H1_HIGH_THRESHOLD=2.0
+ADX_15M_HIGH_THRESHOLD=25.0
+VELOCITY_SPIKE_MULTIPLIER=2.0
+
+# LBMA Auction Blackouts - Client Spec: ±10-15 min around 10:30 & 15:00 London
+LBMA_AUCTION_BUFFER_MINUTES=15
+
+# News Blackout Configuration - Client Spec: Tier-1 ≥60min, Others ≥30min
+NEWS_TIER1_BUFFER_MINUTES=60
+NEWS_OTHER_BUFFER_MINUTES=30
+NEWS_TIER1_EVENTS=FOMC,CPI,NFP,INTEREST_RATE_DECISION
+
+# Weekly Circuit Breaker - Client Spec: ≥6R weekly loss
+WEEKLY_LOSS_LIMIT_R=6.0
+
+# Acceptance Outside Guard - Client Spec: ≥2 full M5 closes outside = breakout
+ACCEPTANCE_OUTSIDE_CLOSES_LIMIT=2
+
+# SL/TP Configuration - Client Spec: SL 2-5 pips beyond sweep, BE at +0.5R
+SL_BUFFER_PIPS_MIN=2
+SL_BUFFER_PIPS_MAX=5
+BREAKEVEN_THRESHOLD_R=0.5
+TRAILING_ATR_MULTIPLIER=0.75
+
+# -----------------------------------------------------------------------------
+# PHASE 3 ENHANCEMENTS - MINIMAL GPT INTEGRATION & ADVANCED FEATURES
+# -----------------------------------------------------------------------------
+# GPT Integration
+ENABLE_GPT_INTEGRATION=FALSE
+OPENAI_API_KEY=
+GPT_MODEL=gpt-5
+GPT_COOLDOWN_SECONDS=60
+
+# Daily Loss Limits - Client Spec: 2R daily loss limit
+DAILY_LOSS_LIMIT_R=2.0
+
+# Enhanced Sweep Threshold Components - Client Spec: max(10 pips, 7.5-10% range, 0.5×ATR(H1))
+SWEEP_THRESHOLD_FLOOR_PIPS=10.0
+SWEEP_THRESHOLD_RANGE_PCT=9.0
+
+# Entry Zone Configuration - Client Spec: Use confirmation body (50-100%), not Asian midpoint
+ENTRY_ZONE_RETRACEMENT_MIN=0.5
+ENTRY_ZONE_RETRACEMENT_MAX=1.0
+
+#
+# MT5 ORDER PARAMETERS
+#
+# Order deviation in points
+ORDER_DEVIATION=20
+# Magic number for orders
+MAGIC_NUMBER=234000
+# Order comment prefix
+ORDER_COMMENT=API_Trade
+# Pip value per lot for position sizing
+PIP_VALUE_PER_LOT=10
+
+
+TELEGRAM_BOT_TOKEN=
+RECIVER_ID=

@@ -1,0 +1,942 @@
+import MetaTrader5 as mt5
+import pandas as pd
+from datetime import datetime, time as dt_time, timedelta
+import time as time_module
+from typing import Dict, Tuple, Optional, Any
+import pytz
+import os
+from dotenv import load_dotenv
+from ..utils.error_handler import mt5_error
+from ..utils.send_logs import send_log
+
+# Load environment variables
+load_dotenv()
+
+class MT5Service:
+    def __init__(self):
+        self.connected = False
+        self.account = None
+        self.last_heartbeat = None
+        self.health_check_interval = int(os.getenv('MT5_HEALTH_CHECK_INTERVAL', '60'))  # seconds
+        self.max_heartbeat_age = int(os.getenv('MT5_MAX_HEARTBEAT_AGE', '300'))  # seconds
+        self.connection_attempts = 0
+        self.max_connection_attempts = int(os.getenv('MT5_MAX_CONNECTION_ATTEMPTS', '5'))
+        self.connection_backoff = int(os.getenv('MT5_CONNECTION_BACKOFF', '60'))  # seconds
+        self.last_connection_attempt = None
+        # Load test mode setting from environment
+        self.test_mode_outside_asian_range = os.getenv('TEST_MODE_OUTSIDE_ASIAN_RANGE', 'False').lower() == 'true'
+        
+        # Initialize connection monitoring
+        self._start_health_monitoring()
+    
+    def _start_health_monitoring(self):
+        """Start background health monitoring thread"""
+        import threading
+        self.monitoring_thread = threading.Thread(target=self._health_monitor_loop, daemon=True)
+        self.monitoring_thread.start()
+    
+    def _health_monitor_loop(self):
+        """Background thread for continuous health monitoring"""
+        while True:
+            try:
+                self._check_connection_health()
+                time_module.sleep(self.health_check_interval)
+            except Exception as e:
+                send_log(f"Health monitor error: {str(e)}", 'error')
+                time_module.sleep(5)  # Short delay on error
+    
+    def _check_connection_health(self):
+        """Check MT5 connection health and attempt recovery if needed"""
+        if not self.check_connection(update_heartbeat=True):
+            send_log("MT5 connection health check failed", 'warning')
+            self._attempt_reconnection()
+    
+    def _attempt_reconnection(self):
+        """Attempt to reconnect to MT5 with exponential backoff"""
+        if self.connection_attempts >= self.max_connection_attempts:
+            current_time = datetime.now()
+            if (self.last_connection_attempt and 
+                (current_time - self.last_connection_attempt).total_seconds() < self.connection_backoff):
+                return False
+            
+            # Reset attempts after backoff period
+            self.connection_attempts = 0
+        
+        self.connection_attempts += 1
+        self.last_connection_attempt = datetime.now()
+        
+        try:
+            return self.initialize_mt5()
+        except Exception as e:
+            send_log(f"MT5 reconnection attempt {self.connection_attempts} failed: {str(e)}", 'error')
+            return False
+    
+    def initialize_mt5(self) -> bool:
+        """Initialize MT5 connection with enhanced error handling and monitoring"""
+        try:
+            # First, try to shutdown if already initialized
+            try:
+                mt5.shutdown()
+            except:
+                pass
+            
+            # Get credentials from environment
+            account = os.getenv('MT5_ACCOUNT')
+            password = os.getenv('MT5_PASSWORD')
+            server = os.getenv('MT5_SERVER')
+            
+            if not all([account, password, server]):
+                raise ValueError("MT5 credentials not properly configured in environment")
+            
+            # Initialize MT5 (try default first, then configured paths)
+            init_ok = mt5.initialize()
+            if not init_ok:
+                # Try configured installation paths from environment variables
+                candidate_paths = [
+                    os.getenv('MT5_PATH_1', r"C:\Program Files\MetaTrader 5\terminal64.exe"),
+                    os.getenv('MT5_PATH_2', r"C:\Program Files\MetaTrader 5\terminal.exe"),
+                    os.getenv('MT5_PATH_3', r"C:\Program Files (x86)\MetaTrader 5\terminal64.exe"),
+                    os.getenv('MT5_PATH_4', r"C:\Program Files (x86)\MetaTrader 5\terminal.exe"),
+                    r"C:\Program Files\MetaTrader 5 IC Markets\terminal64.exe",
+                    r"C:\Program Files\MetaTrader 5 Demo\terminal64.exe",
+                    r"C:\Program Files\MetaTrader 5 IC Markets (SC)\terminal64.exe",
+                ]
+                
+                # Log all candidate paths being checked
+                send_log("Checking MT5 paths: " + "\n".join(candidate_paths), 'info')
+                
+                for path in candidate_paths:
+                    try:
+                        if os.path.exists(path):
+                            send_log(f"Found MT5 at path: {path}", 'info')
+                            if mt5.initialize(path=path):
+                                init_ok = True
+                                send_log(f"MT5 initialized using path: {path}", 'success')
+                                break
+                            else:
+                                error = mt5.last_error()
+                                send_log(f"MT5 initialization failed for path {path}: {error}", 'error')
+                        else:
+                            send_log(f"MT5 path not found: {path}", 'info')
+                    except Exception as e:
+                        send_log(f"Error checking MT5 path {path}: {str(e)}", 'error')
+                        continue
+                        
+            # Login to MT5
+            if init_ok:
+                login_result = mt5.login(
+                    login=int(account),
+                    password=password,
+                    server=server
+                )
+                if login_result:
+                    self.account = account
+                    self.connected = True
+                    send_log(f"Successfully logged into MT5 account {account} on {server}", 'success')
+                    return True
+                else:
+                    error = mt5.last_error()
+                    raise ValueError(f"MT5 login failed: {error[1]}")
+            
+            if not init_ok:
+                error = mt5.last_error()
+                send_log(f"MT5 initialize failed, error: {error}", 'error')
+                return False
+
+            send_log("MT5 initialized successfully", 'success')
+            self.connected = True
+            return True
+
+        except Exception as e:
+            send_log(f"MT5 initialization error: {e}", 'error')
+            return False
+    
+    def connect(self) -> Tuple[bool, Optional[int]]:
+        """Connect to MT5 account with auto-reconnection"""
+        try:
+            if not self.connected:
+                success = self.initialize_mt5()
+                if not success:
+                    error = mt5.last_error()
+                    send_log(f"MT5 initialization failed: {error}", 'error')
+                    return False, error
+                return True, None
+            return True, None
+        except Exception as e:
+            send_log(f"MT5 connection error: {e}", 'error')
+            return False, str(e)
+
+        try:
+            # Connect to trade account
+            if password:
+                authorized = mt5.login(login=account, password=password, server=server)
+            else:
+                authorized = mt5.login(login=account)
+            
+            if authorized:
+                self.account = account
+                self.connected = True
+                self.last_heartbeat = datetime.now()
+                self.connection_attempts = 0  # Reset connection attempts
+                
+                # Verify connection with test request
+                if self._verify_connection():
+                    send_log(f"Connected to account #{account} and verified", 'success')
+                    return True, None
+                else:
+                    send_log("Connection verified failed", 'error')
+                    self._cleanup_connection()
+                    return False, -1
+            else:
+                error = mt5.last_error()
+                send_log(f"Login failed, error code: {error}", 'error')
+                self._cleanup_connection()
+                return False, error
+
+        except Exception as e:
+            send_log(f"Connection error: {e}", 'error')
+            self._cleanup_connection()
+            return False, None
+    
+    def _verify_connection(self) -> bool:
+        """Verify MT5 connection with test request"""
+        try:
+            # Try to get account info as connection test
+            account_info = mt5.account_info()
+            if account_info is not None:
+                return True
+        except Exception as e:
+            send_log(f"Connection verification failed: {e}", 'error')
+        return False
+    
+    def _cleanup_connection(self):
+        """Clean up failed connection"""
+        try:
+            mt5.shutdown()
+        except:
+            pass
+        self.connected = False
+        self.account = None
+        self.last_heartbeat = None
+    
+    def check_connection(self, update_heartbeat: bool = False) -> bool:
+        """Check if MT5 connection is alive and healthy"""
+        if not self.connected:
+            return False
+            
+        try:
+            # Verify terminal connection
+            if not mt5.terminal_info():
+                send_log("MT5 terminal not responding", 'warning')
+                return False
+                
+            # Check heartbeat age
+            if self.last_heartbeat:
+                heartbeat_age = (datetime.now() - self.last_heartbeat).total_seconds()
+                if heartbeat_age > self.max_heartbeat_age:
+                    send_log(f"MT5 heartbeat too old: {heartbeat_age}s", 'warning')
+                    return False
+            
+            # Update heartbeat if requested
+            if update_heartbeat:
+                self.last_heartbeat = datetime.now()
+            
+            return True
+            
+        except Exception as e:
+            send_log(f"MT5 connection check failed: {e}", 'error')
+            return False
+    
+    @mt5_error
+    def disconnect(self):
+        """Disconnect from MT5 with cleanup"""
+        if self.connected:
+            try:
+                mt5.shutdown()
+            except Exception as e:
+                send_log(f"Error during MT5 shutdown: {e}", 'warning')
+            finally:
+                self._cleanup_connection()
+                send_log("Disconnected from MT5", 'info')
+            self.account = None
+            send_log("Disconnected from MT5", 'info')
+    
+    def _ensure_connected(self) -> bool:
+        """Ensure MT5 connection is active, attempt reconnection if needed"""
+        if self.connected and self.check_connection():
+            return True
+            
+        send_log("🔄 Attempting auto-reconnect to MT5...", 'info')
+        
+        # Try to initialize MT5
+        success = self.initialize_mt5()
+        if not success:
+            send_log("❌ Auto-reconnect to MT5 failed", 'error')
+            return False
+            
+        # Try to connect to account using env vars
+        login_str = os.environ.get('MT5_LOGIN', '0')
+        if not login_str.isdigit():
+            send_log("❌ Invalid MT5_LOGIN environment variable", 'error')
+            return False
+            
+        login = int(login_str)
+        password = os.environ.get('MT5_PASSWORD', '')
+        server = os.environ.get('MT5_SERVER', 'MetaQuotes-Demo')
+        
+        if login > 0 and password and not password.startswith('YOUR_'):
+            connected, error = self.connect(login, password, server)
+            if not connected:
+                send_log(f"❌ Auto-connect to MT5 account failed: {error}", 'error')
+                return False
+            return True
+        else:
+            send_log("❌ MT5 credentials not configured for auto-connect", 'error')
+            return False
+    
+    @mt5_error
+    def get_historical_data(self, symbol: str, timeframe: str, start_time: datetime, end_time: datetime) -> Optional[pd.DataFrame]:
+        """Get historical data with auto-reconnection and validation"""
+        if not self._ensure_connected():
+            return None
+
+        timeframes = {
+            'M1': mt5.TIMEFRAME_M1,
+            'M5': mt5.TIMEFRAME_M5,
+            'M15': mt5.TIMEFRAME_M15,
+            'H1': mt5.TIMEFRAME_H1,
+            'H4': mt5.TIMEFRAME_H4,
+            'D1': mt5.TIMEFRAME_D1
+        }
+
+        tf = timeframes.get(timeframe.upper(), mt5.TIMEFRAME_M5)
+
+        try:
+            # Ensure symbol is selected/visible before fetching rates
+            info = mt5.symbol_info(symbol)
+            if info is None or not info.visible:
+                if not mt5.symbol_select(symbol, True):
+                    error_info = mt5.last_error()
+                    send_log(f"Failed to select symbol {symbol}: {error_info}", 'error')
+                    return None
+
+            # Ensure MT5 receives naive UTC datetimes
+            st = start_time.astimezone(pytz.UTC).replace(tzinfo=None) if hasattr(start_time, 'tzinfo') and start_time.tzinfo else start_time
+            et = end_time.astimezone(pytz.UTC).replace(tzinfo=None) if hasattr(end_time, 'tzinfo') and end_time.tzinfo else end_time
+
+            # First try copy_rates_range
+            print(f"📊 Attempting to get {symbol} {timeframe} data from {st} to {et}")
+            rates = mt5.copy_rates_range(symbol, tf, st, et)
+            
+            if rates is None:
+                error_info = mt5.last_error()
+                print(f"⚠️ copy_rates_range failed: {error_info}")
+                
+                # Try alternative method with copy_rates_from_pos
+                # Calculate how many bars we need (approximate)
+                time_diff = et - st
+                if timeframe.upper() == 'M1':
+                    bars_needed = int(time_diff.total_seconds() / 60) + 10
+                elif timeframe.upper() == 'M5':
+                    bars_needed = int(time_diff.total_seconds() / 300) + 10
+                elif timeframe.upper() == 'H1':
+                    bars_needed = int(time_diff.total_seconds() / 3600) + 5
+                else:
+                    bars_needed = 100
+
+                # Limit to reasonable number
+                bars_needed = min(bars_needed, 1000)
+                print(f"📊 Trying copy_rates_from_pos with {bars_needed} bars")
+                
+                # Try getting recent data
+                rates = mt5.copy_rates_from_pos(symbol, tf, 0, bars_needed)
+
+                if rates is not None and len(rates) > 0:
+                    # Filter to requested time range
+                    df_temp = pd.DataFrame(rates)
+                    df_temp['time'] = pd.to_datetime(df_temp['time'], unit='s')
+
+                    # Convert start/end times to pandas datetime for comparison
+                    start_pd = pd.to_datetime(st)
+                    end_pd = pd.to_datetime(et)
+
+                    # Filter by time range
+                    mask = (df_temp['time'] >= start_pd) & (df_temp['time'] <= end_pd)
+                    rates_filtered = df_temp[mask]
+
+                    if len(rates_filtered) > 0:
+                        print(f"✅ Successfully retrieved {len(rates_filtered)} bars using copy_rates_from_pos")
+                        return rates_filtered.reset_index(drop=True)
+                    else:
+                        print(f"⚠️ No data in requested time range using copy_rates_from_pos")
+                else:
+                    error_info = mt5.last_error()
+                    print(f"⚠️ copy_rates_from_pos also failed: {error_info}")
+
+            if rates is None or len(rates) == 0:
+                # Check if market is closed
+                current_time = datetime.utcnow()
+                if current_time.weekday() >= 5:  # Weekend
+                    print(f"📅 Market closed (Weekend) - No {symbol} {timeframe} data available")
+                else:
+                    print(f"⚠️ No data returned for {symbol} {timeframe} (Market may be closed or no data in range)")
+                return None
+
+            df = pd.DataFrame(rates)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+            print(f"✅ Successfully retrieved {len(df)} bars using copy_rates_range")
+            return df
+
+        except Exception as e:
+            error_info = mt5.last_error()
+            print(f"❌ Error fetching historical data for {symbol} {timeframe}: {e} (MT5 error: {error_info})")
+            return None
+    
+    def get_asian_session_data(self, symbol: str = "XAUUSD") -> Dict:
+        """
+        Calculate Asian session data (00:00-06:00 UTC) or test range if test mode is enabled
+        Returns: high, low, midpoint, range_size, grade, risk_multiplier
+        """
+        print(f"\n{'='*50}")
+        if self.test_mode_outside_asian_range:
+            print("CALCULATING TEST RANGE (OUTSIDE ASIAN SESSION)")
+        else:
+            print("CALCULATING ASIAN SESSION RANGE")
+        print(f"{'='*50}")
+        
+        try:
+            # Calculate UTC window for today
+            now_utc = datetime.utcnow()
+            today_utc = now_utc.date()
+            
+            # Check if test mode is enabled
+            if self.test_mode_outside_asian_range:
+                # For testing, use the last 6 hours instead of Asian session
+                end_time = now_utc
+                start_time = end_time - timedelta(hours=6)
+                session_type = "TEST"
+                print(f"🧪 Test mode enabled - using last 6 hours for testing")
+            else:
+                # Normal Asian session (00:00-06:00 UTC)
+                start_time = datetime.combine(today_utc, dt_time(0, 0))   # 00:00 UTC
+                end_time = datetime.combine(today_utc, dt_time(6, 0))     # 06:00 UTC
+                session_type = "ASIAN"
+            
+            print(f"📅 Fetching {session_type} session data for {symbol}")
+            print(f"⏰ Time range (UTC): {start_time} to {end_time}")
+            
+            # Get M5 data for the session
+            df = self.get_historical_data(symbol, "M5", start_time, end_time)
+            
+            if df is None or len(df) == 0:
+                # Try to get more detailed error information
+                error_info = mt5.last_error()
+                error_message = f"MT5 error: {error_info}" if error_info else "No data available"
+                
+                print(f"⚠️ No data available for {session_type} session - {error_message}")
+                return {
+                    'success': False,
+                    'error': error_message,
+                    'symbol': symbol,
+                    'test_mode': self.test_mode_outside_asian_range
+                }
+            
+            print(f"✅ Retrieved {len(df)} M5 bars for {session_type} session")
+            
+            # Calculate range
+            high = df['high'].max()
+            low = df['low'].min()
+            midpoint = (high + low) / 2
+            # Get pip value from environment variables based on symbol
+            pip_multiplier = self._get_pip_multiplier(symbol)
+            range_pips = round((high - low) * pip_multiplier, 1)
+            
+            print(f"✅ Range calculated: {high} - {low} = {range_pips} pips")
+            
+            # Apply grading logic
+            grade, risk_multiplier = self._grade_range(range_pips)
+
+            # Calculate dynamic sweep threshold
+            sweep_threshold_data = self._calculate_dynamic_sweep_threshold(symbol, range_pips)
+
+            print(f"✅ {session_type} range calculated: {range_pips}pips ({grade})")
+            print(f"✅ Dynamic sweep threshold: {sweep_threshold_data['threshold_pips']:.1f}pips (from {sweep_threshold_data['chosen_component']})")
+            
+            return {
+                'success': True,
+                'symbol': symbol,
+                'session_date': today_utc.isoformat(),
+                'high': high,
+                'low': low,
+                'midpoint': midpoint,
+                'range_pips': range_pips,
+                'grade': grade,
+                'risk_multiplier': risk_multiplier,
+                'start_time': start_time,
+                'end_time': end_time,
+                'timezone': 'UTC',
+                'data_points': len(df),
+                'sweep_threshold': sweep_threshold_data,
+                'calculation_timestamp': now_utc.isoformat(),
+                'pip_multiplier': pip_multiplier,
+                'test_mode': self.test_mode_outside_asian_range,  # Add test mode flag
+                'session_type': session_type,  # Add session type
+                'traceability': {
+                    'method': 'get_asian_session_data',
+                    'service': 'MT5Service',
+                    'data_source': 'M5_historical',
+                    'calculation_time': now_utc.isoformat(),
+                    'session_window': f"{start_time.isoformat()}_to_{end_time.isoformat()}",
+                    'test_mode': self.test_mode_outside_asian_range
+                }
+            }
+            
+        except Exception as e:
+            # Get MT5 error if available
+            error_info = mt5.last_error()
+            error_message = f"{str(e)}"
+            if error_info:
+                error_message += f" (MT5 error: {error_info})"
+                
+            print(f"❌ Error in get_asian_session_data: {error_message}")
+            import traceback
+            print(f"❌ Traceback: {traceback.format_exc()}")
+            
+            return {
+                'success': False,
+                'error': error_message,
+                'symbol': symbol,
+                'test_mode': self.test_mode_outside_asian_range
+            }
+    def _get_pip_multiplier(self, symbol: str) -> float:
+        """Get pip multiplier for symbol from environment variables"""
+        symbol_upper = symbol.upper()
+        if symbol_upper == 'XAUUSD':
+            return 1.0 / float(os.getenv('XAUUSD_PIP_VALUE', '0.1'))
+        elif symbol_upper in ['EURUSD', 'GBPUSD']:
+            return 1.0 / float(os.getenv(f'{symbol_upper}_PIP_VALUE', '0.0001'))
+        elif symbol_upper == 'USDJPY':
+            return 1.0 / float(os.getenv('USDJPY_PIP_VALUE', '0.01'))
+        else:
+            # Default to XAUUSD pip value
+            return 1.0 / float(os.getenv('XAUUSD_PIP_VALUE', '0.1'))
+
+    def _calculate_dynamic_sweep_threshold(self, symbol: str, range_pips: float) -> Dict:
+        """Calculate dynamic sweep threshold - Client Spec: max(10 pips, 7.5-10% of Asia range, 0.5×ATR(H1))"""
+        try:
+            # Component 1: Floor threshold
+            floor_pips = float(os.getenv('MIN_SWEEP_THRESHOLD_PIPS', '10'))
+            print(f"📊 Floor threshold: {floor_pips} pips")
+
+            # Component 2: Percentage of Asian range
+            if symbol.upper() == 'XAUUSD':
+                pct = float(os.getenv('SWEEP_THRESHOLD_PERCENTAGE_XAUUSD', '0.095'))  # 9.5% for XAUUSD
+            else:
+                pct_min = float(os.getenv('SWEEP_THRESHOLD_PERCENTAGE_MIN', '0.075'))
+                pct_max = float(os.getenv('SWEEP_THRESHOLD_PERCENTAGE_MAX', '0.10'))
+                pct = (pct_min + pct_max) / 2  # Use average for other symbols
+
+            percentage_pips = range_pips * pct
+            print(f"📊 Percentage threshold: {percentage_pips} pips ({pct*100}% of range)")
+
+            # Component 3: ATR(H1) based threshold
+            # Fixed: Use get_historical_data instead of get_rates
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(hours=24)  # Get 24 hours of H1 data
+            print(f"📊 Getting ATR(H1) data from {start_time} to {end_time}")
+            
+            atr_h1_data = self.get_historical_data(symbol, "H1", start_time, end_time)
+            
+            atr_h1_pips = 0.0
+            if atr_h1_data is not None and len(atr_h1_data) >= 14:
+                # Calculate ATR(H1) in pips
+                pip_multiplier = self._get_pip_multiplier(symbol)
+                atr_h1_raw = self._calculate_atr(atr_h1_data, 14)
+                atr_h1_pips = atr_h1_raw * pip_multiplier
+                print(f"📊 ATR(H1) calculated: {atr_h1_raw} ({atr_h1_pips} pips)")
+            else:
+                print(f"⚠️ Insufficient H1 data for ATR calculation: {len(atr_h1_data) if atr_h1_data else 0} bars")
+
+            atr_multiplier = float(os.getenv('SWEEP_THRESHOLD_ATR_MULTIPLIER', '0.5'))
+            atr_threshold_pips = atr_h1_pips * atr_multiplier
+            print(f"📊 ATR threshold: {atr_threshold_pips} pips ({atr_multiplier}x ATR)")
+
+            # Choose the maximum of all three components
+            chosen_threshold = max(floor_pips, percentage_pips, atr_threshold_pips)
+            
+            # Determine which component was chosen
+            if chosen_threshold == floor_pips:
+                chosen_component = 'floor'
+            elif chosen_threshold == percentage_pips:
+                chosen_component = 'percentage'
+            else:
+                chosen_component = 'atr'
+
+            print(f"📊 Final threshold: {chosen_threshold} pips (from {chosen_component})")
+
+            return {
+                'threshold_pips': chosen_threshold,
+                'floor_pips': floor_pips,
+                'percentage_pips': percentage_pips,
+                'atr_h1_pips': atr_h1_pips,
+                'atr_threshold_pips': atr_threshold_pips,
+                'chosen_component': chosen_component
+            }
+        except Exception as e:
+            print(f"❌ Error calculating dynamic sweep threshold: {e}")
+            import traceback
+            print(f"❌ Traceback: {traceback.format_exc()}")
+            
+            # Return a default threshold if calculation fails
+            return {
+                'threshold_pips': 10.0,  # Default floor value
+                'floor_pips': 10.0,
+                'percentage_pips': 0.0,
+                'atr_h1_pips': 0.0,
+                'atr_threshold_pips': 0.0,
+                'chosen_component': 'floor (default due to error)'
+            }
+
+    def _calculate_atr(self, rates_data, period: int = 14) -> float:
+        """Calculate Average True Range"""
+        try:
+            if rates_data is None or len(rates_data) < period + 1:
+                print(f"⚠️ Insufficient data for ATR calculation: need {period+1} bars, got {len(rates_data) if rates_data else 0}")
+                return 0.0
+
+            # Convert DataFrame to list of dictionaries if needed
+            if hasattr(rates_data, 'to_dict'):
+                rates_list = rates_data.to_dict('records')
+            else:
+                rates_list = rates_data
+
+            true_ranges = []
+            for i in range(1, len(rates_list)):
+                high = rates_list[i]['high']
+                low = rates_list[i]['low']
+                prev_close = rates_list[i-1]['close']
+
+                tr1 = high - low
+                tr2 = abs(high - prev_close)
+                tr3 = abs(low - prev_close)
+
+                true_range = max(tr1, tr2, tr3)
+                true_ranges.append(true_range)
+
+            # Calculate ATR as simple moving average of true ranges
+            if len(true_ranges) >= period:
+                atr = sum(true_ranges[-period:]) / period
+            else:
+                atr = sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
+
+            print(f"📊 ATR calculated: {atr}")
+            return atr
+        except Exception as e:
+            print(f"❌ Error in ATR calculation: {e}")
+            import traceback
+            print(f"❌ Traceback: {traceback.format_exc()}")
+            return 0.0
+        
+    def _grade_range(self, range_pips: float) -> Tuple[str, float]:
+        """Grade the Asian range and determine risk multiplier - Client Spec Implementation"""
+        no_trade_max = float(os.getenv('NO_TRADE_RANGE_MAX', '30'))
+        tight_max = float(os.getenv('TIGHT_RANGE_MAX', '49'))
+        normal_max = float(os.getenv('NORMAL_RANGE_MAX', '150'))
+        wide_max = float(os.getenv('WIDE_RANGE_MAX', '180'))
+
+        no_trade_multiplier = float(os.getenv('NO_TRADE_RISK_MULTIPLIER', '0.0'))
+        tight_multiplier = float(os.getenv('TIGHT_RANGE_RISK_MULTIPLIER', '0.5'))
+        normal_multiplier = float(os.getenv('NORMAL_RANGE_RISK_MULTIPLIER', '1.0'))
+        wide_multiplier = float(os.getenv('WIDE_RANGE_RISK_MULTIPLIER', '0.5'))
+
+        if range_pips < no_trade_max:
+            return "NO_TRADE", no_trade_multiplier
+        elif range_pips <= tight_max:
+            return "TIGHT", tight_multiplier
+        elif range_pips <= normal_max:
+            return "NORMAL", normal_multiplier
+        elif range_pips <= wide_max:
+            return "WIDE", wide_multiplier
+        else:
+            return "EXTREME", no_trade_multiplier  # Extreme ranges also get no trade
+    
+    def get_current_price(self, symbol: str) -> Optional[Dict]:
+        """Get current price for a symbol"""
+        if not self.connected:
+            send_log("Not connected to MT5", 'error')
+            return None
+        
+        try:
+            info = mt5.symbol_info(symbol)
+            if info is None:
+                print(f"❌ Symbol {symbol} not found in Market Watch. Attempting to select...")
+                if not mt5.symbol_select(symbol, True):
+                    print(f"❌ Unable to select symbol {symbol}.")
+                    return None
+                info = mt5.symbol_info(symbol)
+                if info is None:
+                    return None
+            if not info.visible:
+                # Try to make the symbol visible
+                if not mt5.symbol_select(symbol, True):
+                    print(f"❌ Symbol {symbol} is not visible and could not be selected.")
+                    return None
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                print(f"⚠️ No tick data for {symbol}. Market may be closed or no data available.")
+                return None
+            return {
+                'symbol': symbol,
+                'bid': tick.bid,
+                'ask': tick.ask,
+                'last': tick.last,
+                'volume': tick.volume,
+                'time': pd.to_datetime(tick.time, unit='s').isoformat()
+            }
+        except Exception as e:
+            print(f"❌ Error getting current price: {e}")
+            return None
+    
+    def get_account_info(self):
+        """Get account information"""
+        if not self.connected:
+            print("❌ Not connected to MT5")
+            return None
+        
+        try:
+            account_info = mt5.account_info()
+            if account_info is None:
+                print("⚠️ No account info available")
+                return None
+            
+            return account_info._asdict()
+            
+        except Exception as e:
+            print(f"❌ Error getting account info: {e}")
+            return None
+    
+    def get_symbols(self):
+        """Get all available symbols"""
+        if not self.connected:
+            print("❌ Not connected to MT5")
+            return []
+        
+        try:
+            symbols = mt5.symbols_get()
+            if symbols is None:
+                print("⚠️ No symbols available")
+                return []
+            
+            return [symbol.name for symbol in symbols]
+            
+        except Exception as e:
+            print(f"❌ Error getting symbols: {e}")
+            return []
+    
+    def get_rates(self, symbol: str, timeframe: str, count: int = 100):
+        """Get historical rates for a symbol"""
+        if not self.connected:
+            print("❌ Not connected to MT5")
+            return None
+        
+        try:
+            timeframes = {
+                'M1': mt5.TIMEFRAME_M1,
+                'M5': mt5.TIMEFRAME_M5,
+                'M15': mt5.TIMEFRAME_M15,
+                'H1': mt5.TIMEFRAME_H1,
+                'H4': mt5.TIMEFRAME_H4,
+                'D1': mt5.TIMEFRAME_D1
+            }
+            
+            tf = timeframes.get(timeframe.upper(), mt5.TIMEFRAME_M5)
+            
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+            if rates is None or len(rates) == 0:
+                print(f"⚠️ No data returned for {symbol} {timeframe}")
+                return None
+            
+            df = pd.DataFrame(rates)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+            return df.to_dict('records')
+            
+        except Exception as e:
+            print(f"❌ Error getting rates: {e}")
+            return None
+    
+    def get_current_price(self, symbol: str):
+        """Get current bid/ask/last price for a symbol"""
+        if not self.connected:
+            print("❌ Not connected to MT5")
+            return None
+        try:
+            info = mt5.symbol_info(symbol)
+            if info is None or not info.visible:
+                if not mt5.symbol_select(symbol, True):
+                    print(f"❌ Failed to select symbol {symbol}")
+                    return None
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                return None
+            return {
+                'symbol': symbol,
+                'bid': tick.bid,
+                'ask': tick.ask,
+                'last': getattr(tick, 'last', None),
+                'time': pd.to_datetime(tick.time, unit='s').isoformat()
+            }
+        except Exception as e:
+            print(f"❌ Error getting current price for {symbol}: {e}")
+            return None
+
+    def get_open_orders(self):
+        """Get all open orders"""
+        if not self.connected:
+            print("❌ Not connected to MT5")
+            return []
+        
+        try:
+            orders = mt5.orders_get()
+            if orders is None:
+                return []
+            
+            return [order._asdict() for order in orders]
+            
+        except Exception as e:
+            print(f"❌ Error getting open orders: {e}")
+            return []
+    
+    def get_positions(self):
+        """Get all open positions"""
+        if not self.connected:
+            print("❌ Not connected to MT5")
+            return []
+        
+        try:
+            positions = mt5.positions_get()
+            if positions is None:
+                return []
+            
+            return [position._asdict() for position in positions]
+            
+        except Exception as e:
+            print(f"❌ Error getting positions: {e}")
+            return []
+    
+    def close_position(self, position_id: int):
+        """Close a specific position"""
+        if not self.connected:
+            return {'success': False, 'error': 'Not connected to MT5'}
+        
+        try:
+            position = mt5.positions_get(ticket=position_id)
+            if not position:
+                return {'success': False, 'error': 'Position not found'}
+            
+            position = position[0]
+            
+            # Prepare close request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": position.symbol,
+                "volume": position.volume,
+                "type": mt5.ORDER_TYPE_SELL if position.type == 0 else mt5.ORDER_TYPE_BUY,
+                "position": position_id,
+                "price": mt5.symbol_info_tick(position.symbol).bid if position.type == 0 else mt5.symbol_info_tick(position.symbol).ask,
+                "deviation": 20,
+                "magic": 234000,
+                "comment": "API Close",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_FOK,
+            }
+            
+            result = mt5.order_send(request)
+            
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                return {
+                    'success': False,
+                    'error': f"Close failed: {result.comment} (code: {result.retcode})"
+                }
+            
+            return {'success': True, 'message': 'Position closed successfully'}
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def close_all_positions(self):
+        """Close all open positions"""
+        if not self.connected:
+            return {'success': False, 'error': 'Not connected to MT5'}
+        
+        try:
+            positions = mt5.positions_get()
+            if not positions:
+                return {'success': True, 'message': 'No positions to close'}
+            
+            closed_count = 0
+            errors = []
+            
+            for position in positions:
+                result = self.close_position(position.ticket)
+                if result['success']:
+                    closed_count += 1
+                else:
+                    errors.append(f"Position {position.ticket}: {result['error']}")
+            
+            return {
+                'success': True,
+                'closed_count': closed_count,
+                'total_positions': len(positions),
+                'errors': errors
+            }
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def get_server_time(self):
+        """Get server time"""
+        if not self.connected:
+            return None
+        
+        try:
+            server_time = mt5.symbol_info_tick("EURUSD")
+            if server_time:
+                return pd.to_datetime(server_time.time, unit='s').isoformat()
+            return None
+        except:
+            return None
+    
+    def get_symbol_info(self, symbol: str):
+        """Get symbol information"""
+        if not self.connected:
+            return None
+        
+        try:
+            info = mt5.symbol_info(symbol)
+            if info:
+                return info._asdict()
+            return None
+        except:
+            return None
+    
+    def get_mt5_version(self):
+        """Get MT5 version"""
+        try:
+            return mt5.version()
+        except:
+            return None
+    
+    def get_error_description(self, error_code):
+        """Get human-readable error description"""
+        error_descriptions = {
+            1: "General error",
+            10013: "Invalid account",
+            10015: "Invalid password", 
+            10016: "Invalid server",
+            10021: "Not connected",
+            10027: "Timeout",
+            10028: "Invalid parameters",
+            10029: "No history data",
+            10030: "Not enough memory"
+        }
+        return error_descriptions.get(error_code, f"Unknown error: {error_code}")
