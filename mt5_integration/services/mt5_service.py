@@ -542,45 +542,126 @@ class MT5Service:
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
-    def place_market_order(self, symbol: str, side: str, volume: float, sl: Optional[float] = None, tp: Optional[float] = None, deviation: int = 20, comment: str = "") -> Dict:
-        """Place a real market order (BUY/SELL) with optional SL/TP."""
+    def place_market_order(self, symbol: str, side: str, volume: float, sl: Optional[float] = None, tp: Optional[float] = None, deviation: int = None, comment: str = "", max_retries: Optional[int] = None, log_only: Optional[bool] = None) -> Dict:
+        """Place a market order with SL/TP, retry, slippage control, and log-only mode.
+        - deviation: override in points; if None, computed from env
+        - max_retries: override retry count; if None, from env ORDER_MAX_RETRIES
+        - log_only: if True, do not send order; if None, from env EXECUTION_LOG_ONLY
+        """
         if not self.connected:
             return {'success': False, 'error': 'Not connected to MT5'}
+
+        # Parse env-driven execution controls
+        def _env_true(v):
+            return str(v).strip().upper() in ("1", "TRUE", "YES", "Y")
+
+        if log_only is None:
+            log_only = _env_true(os.getenv('EXECUTION_LOG_ONLY', 'TRUE'))  # Fail-safe default: log-only
+        if max_retries is None:
+            try:
+                max_retries = int(os.getenv('ORDER_MAX_RETRIES', '3'))
+            except Exception:
+                max_retries = 3
+        try:
+            backoff_ms = int(os.getenv('ORDER_RETRY_BACKOFF_MS', '300'))
+        except Exception:
+            backoff_ms = 300
+
+        # Compute deviation points (slippage control)
+        if deviation is None:
+            try:
+                deviation = int(os.getenv('ORDER_DEVIATION', '0'))
+            except Exception:
+                deviation = 0
+        if deviation <= 0:
+            # Derive from MAX_SLIPPAGE_PIPS and symbol point/pip sizes
+            try:
+                symbol_info = mt5.symbol_info(symbol)
+                point = float(symbol_info.point) if symbol_info else 0.01
+                pip_size = float(os.getenv(f'{symbol.upper()}_PIP_VALUE', '0.1'))  # price units per pip
+                max_slippage_pips = float(os.getenv('MAX_SLIPPAGE_PIPS', '1.0'))
+                deviation_points = int(max(1, (max_slippage_pips * pip_size) / max(point, 1e-9)))
+            except Exception:
+                deviation_points = 20
+        else:
+            deviation_points = int(deviation)
+
         try:
             # Ensure symbol is visible
             info = mt5.symbol_info(symbol)
             if info is None or not info.visible:
                 if not mt5.symbol_select(symbol, True):
                     return {'success': False, 'error': f'Failed to select symbol {symbol}'}
-            tick = mt5.symbol_info_tick(symbol)
-            if tick is None:
-                return {'success': False, 'error': 'No tick data'}
+
+            # Build base request, price filled per attempt
             order_type = mt5.ORDER_TYPE_BUY if side.upper() == 'BUY' else mt5.ORDER_TYPE_SELL
-            price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
-            request = {
+
+            # Respect log-only safety mode
+            tick_preview = mt5.symbol_info_tick(symbol)
+            preview_price = (tick_preview.ask if order_type == mt5.ORDER_TYPE_BUY else tick_preview.bid) if tick_preview else None
+            request_preview = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
                 "volume": float(volume),
                 "type": order_type,
-                "price": float(price),
-                "deviation": int(deviation),
+                "price": float(preview_price) if preview_price is not None else None,
+                "deviation": deviation_points,
                 "magic": 234001,
-                "comment": comment or "Phase3 Execution",
+                "comment": comment or "Phase4 Execution",
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
             if sl is not None:
-                request["sl"] = float(sl)
+                request_preview["sl"] = float(sl)
             if tp is not None:
-                request["tp"] = float(tp)
-            result = mt5.order_send(request)
-            if result is None:
-                return {'success': False, 'error': f'order_send failed: {mt5.last_error()}'}
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                return {'success': False, 'error': f'order_send retcode {result.retcode}', 'result': result._asdict()}
-            return {'success': True, 'result': result._asdict()}
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-            
+                request_preview["tp"] = float(tp)
+
+            if log_only:
+                logger.info(f"LOG-ONLY: Skipping live order_send. Request preview: {request_preview}")
+                return {'success': True, 'log_only': True, 'request': request_preview}
+
+            # Live send with retry/backoff
+            last_error = None
+            for attempt in range(1, max_retries + 1):
+                tick = mt5.symbol_info_tick(symbol)
+                if tick is None:
+                    last_error = 'No tick data'
+                    if attempt < max_retries:
+                        time_module.sleep(backoff_ms / 1000.0)
+                        continue
+                    return {'success': False, 'error': last_error}
+
+                price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": symbol,
+                    "volume": float(volume),
+                    "type": order_type,
+                    "price": float(price),
+                    "deviation": deviation_points,
+                    "magic": 234001,
+                    "comment": comment or "Phase4 Execution",
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                if sl is not None:
+                    request["sl"] = float(sl)
+                if tp is not None:
+                    request["tp"] = float(tp)
+
+                result = mt5.order_send(request)
+                if result is None:
+                    last_error = f'order_send failed: {mt5.last_error()}'
+                else:
+                    if result.retcode == mt5.TRADE_RETCODE_DONE:
+                        return {'success': True, 'result': result._asdict()}
+                    # Retry on transient errors; log details
+                    last_error = f"retcode {result.retcode} - {getattr(result, 'comment', '')}"
+                    logger.warning(f"MT5 order attempt {attempt}/{max_retries} failed: {last_error}")
+
+                if attempt < max_retries:
+                    time_module.sleep(backoff_ms / 1000.0)
+
+            return {'success': False, 'error': f'order_send failed after {max_retries} attempts', 'last_error': last_error, 'request': request_preview}
+
         except Exception as e:
             return {'success': False, 'error': str(e)}
     

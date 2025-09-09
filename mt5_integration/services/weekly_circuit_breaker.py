@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 from typing import Dict, Tuple
 from dotenv import load_dotenv
+from mt5_integration.utils.strategy_constants import WEEKLY_LOSS_LIMIT_R
 
 # Load environment variables
 load_dotenv()
@@ -20,7 +21,7 @@ class WeeklyCircuitBreakerService:
     """Manages weekly R tracking and circuit breaker functionality"""
     
     def __init__(self):
-        self.weekly_loss_limit_r = float(os.getenv('WEEKLY_LOSS_LIMIT_R', '6.0'))
+        self.weekly_loss_limit_r = WEEKLY_LOSS_LIMIT_R
         
     def check_weekly_circuit_breaker(self, session) -> Dict:
         """Check if weekly circuit breaker should be triggered"""

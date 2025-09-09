@@ -10,6 +10,10 @@ load_dotenv()
 # Import the base class, not the specific implementation
 # This allows us to work with either MT5Service or MockMT5Service
 logger = logging.getLogger('api_requests')
+from mt5_integration.utils.strategy_constants import (
+    XAUUSD_PIP_VALUE, NO_TRADE_THRESHOLD, TIGHT_RANGE_THRESHOLD, NORMAL_RANGE_THRESHOLD, WIDE_RANGE_THRESHOLD, MAX_RANGE_THRESHOLD,
+    TIGHT_RISK_PERCENTAGE, NORMAL_RISK_PERCENTAGE, WIDE_RISK_PERCENTAGE
+)
 class AsianRangeService:
     def __init__(self, mt5_service: Any):
         self.mt5_service = mt5_service

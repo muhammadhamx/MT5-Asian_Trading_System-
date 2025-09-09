@@ -33,14 +33,18 @@ LOGGING = {
             'filename': 'trading_decisions.log',
             'formatter': 'trading',
         },
+        # Append records into daily JSON array at logs/YYYY-MM-DD.json
+        'json_daily': {
+            'class': 'mt5_integration.utils.production_logger.JsonDailyArrayHandler',
+        },
     },
     'loggers': {
         'trading_bot': {
-            'handlers': ['console', 'file', 'trading_file'],
+            'handlers': ['console', 'file', 'trading_file', 'json_daily'],
             'level': 'INFO',
         },
         'django': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console', 'file', 'json_daily'],
             'level': 'INFO',
         },
     },

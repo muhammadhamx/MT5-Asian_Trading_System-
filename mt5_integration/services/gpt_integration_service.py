@@ -11,6 +11,9 @@ from typing import Dict, Optional, Any
 from dotenv import load_dotenv
 from ..utils.error_handler import gpt_error
 from ..utils.production_logger import gpt_logger
+from mt5_integration.utils.strategy_constants import (
+    DISPLACEMENT_K_NORMAL, DISPLACEMENT_K_HIGH_VOL, TIER1_NEWS_BUFFER_MINUTES, OTHER_NEWS_BUFFER_MINUTES
+)
 
 # Load environment variables
 load_dotenv()

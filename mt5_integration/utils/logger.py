@@ -9,6 +9,7 @@ import logging
 import logging.handlers
 from datetime import datetime
 from pathlib import Path
+from mt5_integration.utils.production_logger import JsonDailyArrayHandler
 
 # Create logs directory if it doesn't exist
 logs_dir = Path(__file__).parent.parent.parent / 'logs'
@@ -16,7 +17,7 @@ logs_dir.mkdir(exist_ok=True)
 
 # Configure root logger
 def setup_logging(bot_name="MT5Bot"):
-    """Configure the logging system with console and file handlers"""
+    """Configure the logging system with console, file handlers, and daily JSON handler"""
     logger = logging.getLogger(bot_name)
     logger.setLevel(logging.INFO)
     
@@ -72,6 +73,11 @@ def setup_logging(bot_name="MT5Bot"):
     trade_handler.setLevel(logging.INFO)
     trade_handler.setFormatter(detailed_formatter)
     logger.addHandler(trade_handler)
+
+    # Daily JSON array handler (pretty-printed array per day)
+    json_handler = JsonDailyArrayHandler()
+    json_handler.setLevel(logging.INFO)
+    logger.addHandler(json_handler)
     
     return logger
 

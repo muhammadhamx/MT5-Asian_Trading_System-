@@ -8,9 +8,80 @@ import json
 import traceback
 import sys
 import codecs
-from datetime import datetime
+import os
+import threading
 from typing import Dict, Any, Optional
 from django.utils import timezone
+
+# JSON-per-day array writer
+class _JsonDailyArrayWriter:
+    def __init__(self, base_logs_dir: str):
+        self.base_logs_dir = base_logs_dir
+        os.makedirs(self.base_logs_dir, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def _file_path_for_today(self) -> str:
+        date_str = timezone.now().date().isoformat()  # e.g., 2025-09-09
+        return os.path.join(self.base_logs_dir, f"{date_str}.json")
+
+    def append(self, obj: Dict[str, Any]):
+        path = self._file_path_for_today()
+        with self._lock:
+            try:
+                if not os.path.exists(path):
+                    # Create new JSON array with first entry
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump([obj], f, ensure_ascii=False, indent=2)
+                        f.write("\n")
+                    return
+
+                # Read, append, write back (pretty-printed)
+                with open(path, 'r', encoding='utf-8') as f:
+                    try:
+                        data = json.load(f)
+                        if not isinstance(data, list):
+                            data = []
+                    except Exception:
+                        data = []
+                data.append(obj)
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+            except Exception:
+                # Fail-safe: ignore file logging errors to not break execution
+                pass
+
+# Derive logs directory at project root
+# utils/production_logger.py -> mt5_integration/utils -> project root is two levels up
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+_DAILY_LOGS_DIR = os.path.join(_PROJECT_ROOT, 'logs')
+_daily_writer = _JsonDailyArrayWriter(_DAILY_LOGS_DIR)
+
+class JsonDailyArrayHandler(logging.Handler):
+    """Logging handler that appends records to a pretty-printed daily JSON array."""
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            entry = {
+                'timestamp': timezone.now().isoformat(),
+                'level': record.levelname,
+                'logger': record.name,
+                'event': getattr(record, 'event', None),
+                'session_id': getattr(record, 'session_id', None),
+                'reason': getattr(record, 'reason', None),
+                'message': record.getMessage(),
+                'context': getattr(record, 'context', None),
+            }
+            old_state = getattr(record, 'old_state', None)
+            new_state = getattr(record, 'new_state', None)
+            if old_state is not None or new_state is not None:
+                entry['state_transition'] = {
+                    'old_state': old_state,
+                    'new_state': new_state,
+                }
+            _daily_writer.append(entry)
+        except Exception:
+            # Never break app flow due to logging I/O issues
+            pass
 
 class ProductionLogger:
     """
@@ -40,7 +111,7 @@ class ProductionLogger:
                         record.msg = record.msg.encode('utf-8').decode('utf-8')
                     return super().format(record)
             
-            # File handler for structured logs
+            # File handler for legacy human-readable log
             file_handler = logging.FileHandler('trading_decisions.log')
             file_handler.setLevel(logging.INFO)
             
@@ -54,37 +125,93 @@ class ProductionLogger:
             self.logger.addHandler(console_handler)
             self.logger.addHandler(file_handler)
     
+    def _build_daily_json_entry(self, level: str, event_type: str, data: Dict[str, Any], message: Optional[str]):
+        # Flatten common fields while preserving full context
+        entry = {
+            'timestamp': timezone.now().isoformat(),
+            'level': level,
+            'event': event_type,             # primary event name
+            'event_type': event_type,        # keep legacy key for compatibility
+            'message': message,
+            'session_id': data.get('session_id'),
+            'reason': data.get('reason'),
+            'context': data,                 # full original payload
+        }
+        # State transition shape if available
+        old_state = data.get('old_state')
+        new_state = data.get('new_state')
+        if old_state is not None or new_state is not None:
+            entry['state_transition'] = {
+                'old_state': old_state,
+                'new_state': new_state,
+            }
+        return entry
+
     def log_structured(self, level: str, event_type: str, data: Dict[str, Any], 
                       message: str = None):
-        """Log structured data with complete context"""
-        log_entry = {
+        """Log structured data with complete context and write JSON to daily file"""
+        # Build display message for console/file handlers
+        display_entry = {
             'timestamp': timezone.now().isoformat(),
             'event_type': event_type,
             'level': level,
             'data': data
         }
-        
         if message:
-            log_entry['message'] = message
-            
-        log_message = json.dumps(log_entry, default=str, indent=2)
-        
-        if level.upper() == 'ERROR':
+            display_entry['message'] = message
+        log_message = json.dumps(display_entry, default=str, indent=2)
+
+        # Emit to standard handlers
+        level_up = level.upper()
+        if level_up == 'ERROR':
             self.logger.error(log_message)
-        elif level.upper() == 'WARNING':
+        elif level_up == 'WARNING':
             self.logger.warning(log_message)
         else:
             self.logger.info(log_message)
+
+        # Append to daily JSON array (pretty-printed)
+        try:
+            json_entry = self._build_daily_json_entry(level_up, event_type, data, message)
+            _daily_writer.append(json_entry)
+        except Exception:
+            # Never fail due to logging I/O issues
+            pass
     
     def log_state_transition(self, session_id: str, old_state: str, new_state: str, 
                            reason: str, context: Dict[str, Any] = None):
-        """Log state machine transitions with full context"""
+        """Log state machine transitions with full context. Ensures a meaningful reason is present."""
+        ctx = context or {}
+        auto_reason = (reason or '').strip()
+        if not auto_reason:
+            # Try to derive a useful reason based on states and context
+            if old_state == new_state:
+                # Maintained state
+                if new_state == 'SWEPT':
+                    inner = ctx if isinstance(ctx, dict) else {}
+                    # Some callers put details inside ctx['context']
+                    if 'context' in inner and isinstance(inner['context'], dict):
+                        inner = {**inner, **inner.get('context', {})}
+                    direction = inner.get('sweep_direction') or 'UNKNOWN'
+                    sweep_price = inner.get('sweep_price')
+                    threshold = inner.get('threshold_pips')
+                    side_word = 'above' if str(direction).upper() == 'UP' else 'below' if str(direction).upper() == 'DOWN' else 'beyond'
+                    price_txt = f" @ {sweep_price}" if sweep_price is not None else ''
+                    thr_txt = f" (threshold {threshold} pips)" if threshold is not None else ''
+                    auto_reason = f"Sweep persists: price remains {side_word}{thr_txt}{price_txt}"
+                else:
+                    auto_reason = f"State maintained: {new_state}"
+            elif new_state == 'IDLE':
+                auto_reason = "Reset to IDLE: conditions cleared or confirmation timeout"
+            else:
+                auto_reason = f"Transitioned to {new_state}"
+        
         self.log_structured('INFO', 'STATE_TRANSITION', {
             'session_id': session_id,
             'old_state': old_state,
             'new_state': new_state,
-            'reason': reason,
-            'context': context or {}
+            'reason': auto_reason,
+            'context': ctx
         }, f"State transition: {old_state} -> {new_state}")
     
     def log_trading_decision(self, decision_type: str, decision: bool, 

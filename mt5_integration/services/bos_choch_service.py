@@ -11,6 +11,10 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
+from mt5_integration.utils.strategy_constants import (
+    XAUUSD_PIP_VALUE, SWEEP_THRESHOLD_FLOOR_PIPS, SWEEP_THRESHOLD_PCT_MIN, SWEEP_THRESHOLD_PCT_MAX, SWEEP_THRESHOLD_PCT_XAU,
+    ATR_H1_LOOKBACK, ADX_15M_LOOKBACK
+)
 
 # Load environment variables
 load_dotenv()
@@ -28,8 +32,8 @@ class BOSCHOCHService:
     
     def __init__(self, mt5_service):
         self.mt5_service = mt5_service
-        self.swing_lookback = int(os.getenv('SWING_LOOKBACK_PERIODS', '5'))
-        self.structure_confirmation_bars = int(os.getenv('STRUCTURE_CONFIRMATION_BARS', '2'))
+        self.swing_lookback = ATR_H1_LOOKBACK
+        self.structure_confirmation_bars = ADX_15M_LOOKBACK
         
     def detect_market_structure_change(self, symbol: str, timeframe: str = 'M1', 
                                      lookback_periods: int = 50) -> Dict:

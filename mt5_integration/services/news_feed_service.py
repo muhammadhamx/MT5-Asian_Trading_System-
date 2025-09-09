@@ -11,6 +11,9 @@ from django.utils import timezone
 from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from ..models import EconomicNews
+from mt5_integration.utils.strategy_constants import (
+    TIER1_NEWS_BUFFER_MINUTES, OTHER_NEWS_BUFFER_MINUTES
+)
 
 # Load environment variables
 load_dotenv()

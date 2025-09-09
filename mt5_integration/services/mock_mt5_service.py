@@ -9,6 +9,10 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 from typing import Dict, List, Tuple, Optional, Union
 from dotenv import load_dotenv
+from mt5_integration.utils.strategy_constants import (
+    XAUUSD_PIP_VALUE, EURUSD_PIP_VALUE, GBPUSD_PIP_VALUE, USDJPY_PIP_VALUE,
+    NO_TRADE_THRESHOLD, TIGHT_RANGE_THRESHOLD, NORMAL_RANGE_THRESHOLD, WIDE_RANGE_THRESHOLD, MAX_RANGE_THRESHOLD
+)
 
 # Load environment variables
 load_dotenv()

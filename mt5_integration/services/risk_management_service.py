@@ -11,6 +11,12 @@ from django.db.models import Sum
 from ..models import TradingSession, TradeSignal
 from ..utils.logger import setup_logging, log_trade
 from ..utils.error_handler import ProductionErrorHandler
+from mt5_integration.utils.strategy_constants import (
+    XAUUSD_PIP_VALUE, EURUSD_PIP_VALUE, GBPUSD_PIP_VALUE, USDJPY_PIP_VALUE,
+    TIGHT_RISK_PERCENTAGE, NORMAL_RISK_PERCENTAGE, WIDE_RISK_PERCENTAGE, MAX_RISK_PER_TRADE,
+    DAILY_TRADE_COUNT_LIMIT, DAILY_LOSS_LIMIT_R, WEEKLY_LOSS_LIMIT_R,
+    MIN_LOT_SIZE, LOT_SIZE_STEP
+)
 
 logger = setup_logging('RiskManager')
 error_handler = ProductionErrorHandler()
@@ -20,10 +26,10 @@ class RiskManagementService:
     
     def __init__(self):
         # Load risk parameters from environment
-        self.max_risk_per_trade = float(os.getenv('MAX_RISK_PER_TRADE', '0.5'))  # 0.5%
-        self.max_daily_loss = float(os.getenv('MAX_DAILY_LOSS', '2.0'))  # 2% max daily loss
-        self.max_weekly_loss = float(os.getenv('MAX_WEEKLY_LOSS', '6.0'))  # 6% max weekly loss
-        self.max_daily_trades = int(os.getenv('MAX_DAILY_TRADES', '2'))
+        self.max_risk_per_trade = MAX_RISK_PER_TRADE  # 0.5%
+        self.max_daily_loss = DAILY_LOSS_LIMIT_R * 100  # 2% max daily loss
+        self.max_weekly_loss = WEEKLY_LOSS_LIMIT_R * 100  # 6% max weekly loss
+        self.max_daily_trades = DAILY_TRADE_COUNT_LIMIT
         self.max_concurrent_trades = int(os.getenv('MAX_CONCURRENT_TRADES', '1'))
         self.min_reward_risk = float(os.getenv('MIN_REWARD_RISK', '1.5'))
         
@@ -49,11 +55,11 @@ class RiskManagementService:
             }
             
             # 1. Check risk percentage
-            if signal.risk_percentage > self.max_risk_per_trade:
+            if signal.risk_percentage > MAX_RISK_PER_TRADE:
                 validation['success'] = False
                 validation['checks']['risk_percentage'] = {
                     'status': 'FAILED',
-                    'reason': f'Risk {signal.risk_percentage}% exceeds max {self.max_risk_per_trade}%'
+                    'reason': f'Risk {signal.risk_percentage}% exceeds max {MAX_RISK_PER_TRADE}%'
                 }
             
             # 2. Validate stop loss distance
@@ -130,18 +136,18 @@ class RiskManagementService:
                 session__session_date=session.session_date
             ).count()
             
-            if daily_trades >= self.max_daily_trades:
+            if daily_trades >= DAILY_TRADE_COUNT_LIMIT:
                 return {
                     'status': False,
-                    'reason': f'Daily trade limit ({self.max_daily_trades}) reached'
+                    'reason': f'Daily trade limit ({DAILY_TRADE_COUNT_LIMIT}) reached'
                 }
             
             # Check daily loss
             daily_loss = float(session.current_daily_loss)
-            if daily_loss >= self.max_daily_loss:
+            if daily_loss >= DAILY_LOSS_LIMIT_R * 100:
                 return {
                     'status': False,
-                    'reason': f'Daily loss limit ({self.max_daily_loss}%) reached: {daily_loss:.2f}%'
+                    'reason': f'Daily loss limit ({DAILY_LOSS_LIMIT_R * 100}%) reached: {daily_loss:.2f}%'
                 }
             
             return {'status': True, 'trades': daily_trades, 'loss': daily_loss}
@@ -159,10 +165,10 @@ class RiskManagementService:
             # Get weekly loss
             weekly_loss = float(session.weekly_realized_r * 0.5)  # Convert R to percentage
             
-            if weekly_loss >= self.max_weekly_loss:
+            if weekly_loss >= WEEKLY_LOSS_LIMIT_R * 100:
                 return {
                     'status': False,
-                    'reason': f'Weekly loss limit ({self.max_weekly_loss}%) reached: {weekly_loss:.2f}%'
+                    'reason': f'Weekly loss limit ({WEEKLY_LOSS_LIMIT_R * 100}%) reached: {weekly_loss:.2f}%'
                 }
             
             return {'status': True, 'loss': weekly_loss}
@@ -314,10 +320,10 @@ class RiskManagementService:
         """Get pip value for symbol"""
         try:
             pip_values = {
-                'XAUUSD': float(os.getenv('XAUUSD_PIP_VALUE', '0.1')),
-                'EURUSD': float(os.getenv('EURUSD_PIP_VALUE', '0.0001')),
-                'GBPUSD': float(os.getenv('GBPUSD_PIP_VALUE', '0.0001')),
-                'USDJPY': float(os.getenv('USDJPY_PIP_VALUE', '0.01'))
+                'XAUUSD': XAUUSD_PIP_VALUE,
+                'EURUSD': EURUSD_PIP_VALUE,
+                'GBPUSD': GBPUSD_PIP_VALUE,
+                'USDJPY': USDJPY_PIP_VALUE
             }
             return pip_values.get(symbol.upper())
         except Exception as e:
@@ -326,8 +332,8 @@ class RiskManagementService:
     
     def _round_lot_size(self, size: float) -> float:
         """Round position size to valid lot size"""
-        min_lot = float(os.getenv('MIN_LOT_SIZE', '0.01'))
-        lot_step = float(os.getenv('LOT_SIZE_STEP', '0.01'))
+        min_lot = MIN_LOT_SIZE
+        lot_step = LOT_SIZE_STEP
         
         # Round down to nearest valid lot size
         lots = round(size / lot_step) * lot_step

@@ -172,20 +172,24 @@ LOGGING = {
             'filename': 'api_requests.log',
             'formatter': 'verbose',
         },
+        'json_daily': {
+            'level': 'INFO',
+            'class': 'mt5_integration.utils.production_logger.JsonDailyArrayHandler',
+        },
     },
     'loggers': {
         'api_requests': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console', 'file', 'json_daily'],
             'level': 'INFO',
             'propagate': False,
         },
         'mt5_integration': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console', 'file', 'json_daily'],
             'level': 'INFO',
             'propagate': False,
         },
         'django.request': {
-            'handlers': ['console'],
+            'handlers': ['console', 'json_daily'],
             'level': 'INFO',
             'propagate': False,
         },

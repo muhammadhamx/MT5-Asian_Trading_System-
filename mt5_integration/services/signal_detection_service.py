@@ -1,5 +1,3 @@
-   
-
 import MetaTrader5 as mt5
 import pandas as pd
 from datetime import datetime, time, timedelta
@@ -16,6 +14,20 @@ from .gpt_integration_service import GPTIntegrationService
 from .bos_choch_service import BOSCHOCHService
 from ..utils.production_logger import trading_logger, system_logger, risk_logger
 import json
+from mt5_integration.utils.strategy_constants import (
+    XAUUSD_PIP_VALUE, EURUSD_PIP_VALUE, GBPUSD_PIP_VALUE, USDJPY_PIP_VALUE,
+    NO_TRADE_THRESHOLD, TIGHT_RANGE_THRESHOLD, NORMAL_RANGE_THRESHOLD, WIDE_RANGE_THRESHOLD, MAX_RANGE_THRESHOLD,
+    TIGHT_RISK_PERCENTAGE, NORMAL_RISK_PERCENTAGE, WIDE_RISK_PERCENTAGE, MAX_RISK_PER_TRADE,
+    SWEEP_THRESHOLD_FLOOR_PIPS, SWEEP_THRESHOLD_PCT_MIN, SWEEP_THRESHOLD_PCT_MAX, SWEEP_THRESHOLD_PCT_XAU,
+    DISPLACEMENT_K_NORMAL, DISPLACEMENT_K_HIGH_VOL,
+    ATR_H1_LOOKBACK, ADX_15M_LOOKBACK, ADX_TREND_THRESHOLD,
+    MAX_SPREAD_PIPS, VELOCITY_SPIKE_MULTIPLIER,
+    TIER1_NEWS_BUFFER_MINUTES, OTHER_NEWS_BUFFER_MINUTES, LBMA_AUCTION_TIMES, LBMA_AUCTION_BUFFER_MINUTES,
+    CONFIRMATION_TIMEOUT_MINUTES, RETEST_MIN_BARS, RETEST_MAX_BARS, RETEST_BAR_MINUTES,
+    SL_BUFFER_PIPS_MIN, SL_BUFFER_PIPS_MAX,
+    DAILY_TRADE_COUNT_LIMIT, DAILY_LOSS_LIMIT_R, WEEKLY_LOSS_LIMIT_R,
+    TRAILING_ATR_M5_MULTIPLIER, MIN_LOT_SIZE, LOT_SIZE_STEP, TIMEZONE
+)
 
 # from ..utils.send_logs import send_log
 
@@ -324,14 +336,13 @@ class SignalDetectionService:
             # Check if NY has swept beyond Asian range
             asian_high = float(self.current_session.asian_range_high)
             asian_low = float(self.current_session.asian_range_low)
-            # Get dynamic sweep threshold
-            range_pips = float(self.current_session.asian_range_size)
-            threshold_data = self.mt5_service._calculate_dynamic_sweep_threshold(
-                self.current_session.symbol, range_pips
-            )
-            threshold_price = threshold_data['threshold_pips'] * float(os.getenv('XAUUSD_PIP_VALUE', '0.1'))
+            # Get dynamic sweep threshold using session range
+            range_pips = float(self.current_session.asian_range_size or 0)
+            threshold_data = self._calculate_sweep_threshold({'range_pips': range_pips})
+            pip_value = float(os.getenv(f"{self.current_session.symbol.upper()}_PIP_VALUE", str(XAUUSD_PIP_VALUE)))
+            threshold_price = float(threshold_data['threshold_pips']) * pip_value
             fresh_sweep = (ny_high > asian_high + threshold_price or
-                          ny_low < asian_low - threshold_price)
+                           ny_low < asian_low - threshold_price)
             return fresh_sweep
         except Exception:
             return False
@@ -367,22 +378,22 @@ class SignalDetectionService:
             end = timezone.now()
             start = end - timedelta(hours=24)
             h1_data = self.mt5_service.get_historical_data(symbol, 'H1', start, end)
-            if h1_data is None or len(h1_data) < 14:
-                return float(os.getenv('DISPLACEMENT_ATR_MULTIPLIER_NORMAL', '1.3'))
+            if h1_data is None or len(h1_data) < ATR_H1_LOOKBACK:
+                return float(os.getenv('DISPLACEMENT_ATR_MULTIPLIER_NORMAL', str(DISPLACEMENT_K_NORMAL)))
             # Calculate current H1 ATR
-            current_atr = self._calculate_atr(h1_data, 14)
-            # Get ATR threshold for high volatility
+            current_atr = self._calculate_atr(h1_data, ATR_H1_LOOKBACK)
+            # Get ATR threshold for high volatility (in pips)
             atr_threshold = float(os.getenv('ATR_H1_HIGH_THRESHOLD', '2.0'))
             # Convert to pips for comparison
             pip_multiplier = self._get_pip_multiplier(symbol)
             atr_pips = current_atr * pip_multiplier
             # Check for high volatility regime
             if atr_pips > atr_threshold:
-                return float(os.getenv('DISPLACEMENT_ATR_MULTIPLIER_HIGH_VOL', '1.5'))
+                return float(os.getenv('DISPLACEMENT_ATR_MULTIPLIER_HIGH_VOL', str(DISPLACEMENT_K_HIGH_VOL)))
             else:
-                return float(os.getenv('DISPLACEMENT_ATR_MULTIPLIER_NORMAL', '1.3'))
+                return float(os.getenv('DISPLACEMENT_ATR_MULTIPLIER_NORMAL', str(DISPLACEMENT_K_NORMAL)))
         except Exception:
-            return float(os.getenv('DISPLACEMENT_ATR_MULTIPLIER_NORMAL', '1.3'))
+            return float(os.getenv('DISPLACEMENT_ATR_MULTIPLIER_NORMAL', str(DISPLACEMENT_K_NORMAL)))
     
     def _check_acceptance_outside(self, symbol: str, asian_high: float, asian_low: float) -> bool:
         """Check for acceptance outside - Client Spec: ≥2 full M5 closes outside = breakout"""
@@ -528,8 +539,8 @@ class SignalDetectionService:
         
         # Calculate dynamic sweep threshold (in pips, convert to price)
         threshold_data = self._calculate_sweep_threshold(asian_data)
-        pip_value = float(os.environ.get('PIP_VALUE', 0.1))   # XAUUSD: 1 pip = $0.10
-        sweep_threshold_pips = threshold_data['threshold_pips']
+        pip_value = float(os.getenv(f"{symbol.upper()}_PIP_VALUE", str(XAUUSD_PIP_VALUE)))
+        sweep_threshold_pips = float(threshold_data['threshold_pips'])
         sweep_threshold_price = sweep_threshold_pips * pip_value
 
         # Check for sweep
@@ -796,16 +807,23 @@ class SignalDetectionService:
         except Exception as e:
             logger.error(f"Failed to update sweep displacement data: {e}")
         
-        # Get retest window from environment
-        retest_window_minutes = int(os.environ.get('RETEST_WINDOW_MINUTES', '15'))  # Default 3×M5
+        # Derive retest window from configured bars and timeframe
+        min_bars = int(os.getenv('RETEST_MIN_BARS', str(RETEST_MIN_BARS)))
+        max_bars = int(os.getenv('RETEST_MAX_BARS', str(RETEST_MAX_BARS)))
+        bar_minutes = int(os.getenv('RETEST_BAR_MINUTES', str(RETEST_BAR_MINUTES)))
+        retest_window_minutes = max_bars * bar_minutes
         
         # Prepare data for GPT entry refinement (Event Edge: CONFIRMED)
         sweep = LiquiditySweep.objects.filter(session=self.current_session).order_by('-sweep_time').first()
-        sweep_data = {
-            'direction': sweep.sweep_direction,
-            'price': float(sweep.sweep_price),
-            'threshold': float(sweep.sweep_threshold)
-        }
+        sweep_data = None
+        if sweep:
+            sweep_data = {
+                'direction': sweep.sweep_direction,
+                'price': float(sweep.sweep_price),
+                'threshold': float(sweep.sweep_threshold)
+            }
+        else:
+            logger.warning("No LiquiditySweep found for session when confirming reversal; skipping sweep-dependent details.")
         
         confirmation_data = {
             'displacement_ratio': body_size / atr if atr > 0 else 0,
@@ -844,10 +862,10 @@ class SignalDetectionService:
         current_price = current_price_data['ask'] if sweep.sweep_direction == 'UP' else current_price_data['bid']
         
         # Calculate levels based on sweep direction with Phase 3 enhancements
-        pip_value = float(os.getenv(f'{symbol.upper()}_PIP_VALUE', '0.1'))
+        pip_value = float(os.getenv(f"{symbol.upper()}_PIP_VALUE", str(XAUUSD_PIP_VALUE)))
         
-        # Use default SL buffer; GPT will be called only once before execution
-        sl_buffer_pips = 3
+        # Use env-configurable SL/TP buffers
+        sl_buffer_pips = float(os.getenv('SL_BUFFER_PIPS', str(SL_BUFFER_PIPS_MIN)))
         sl_buffer = sl_buffer_pips * pip_value
         
         if sweep.sweep_direction == 'UP':
@@ -856,14 +874,16 @@ class SignalDetectionService:
             entry_price = current_price
             stop_loss = float(sweep.sweep_price) + sl_buffer  # Buffer above sweep
             take_profit_1 = float(self.current_session.asian_range_midpoint)
-            take_profit_2 = float(self.current_session.asian_range_low) - (2 * pip_value)  # 2 pips below Asian low
+            tp2_buffer_pips = float(os.getenv('TP2_BUFFER_PIPS', '2'))
+            take_profit_2 = float(self.current_session.asian_range_low) - (tp2_buffer_pips * pip_value)
         else:
             # Sweep was DOWN, so we want to BUY (fade the sweep)
             signal_type = 'BUY'
             entry_price = current_price
             stop_loss = float(sweep.sweep_price) - sl_buffer  # Buffer below sweep
             take_profit_1 = float(self.current_session.asian_range_midpoint)
-            take_profit_2 = float(self.current_session.asian_range_high) + (2 * pip_value)  # 2 pips above Asian high
+            tp2_buffer_pips = float(os.getenv('TP2_BUFFER_PIPS', '2'))
+            take_profit_2 = float(self.current_session.asian_range_high) + (tp2_buffer_pips * pip_value)
         
         # Enhanced risk calculation with Phase 3 multipliers - Client Spec Compliant
         account_info = self.mt5_service.get_account_info()
@@ -871,8 +891,8 @@ class SignalDetectionService:
             return {'success': False, 'error': 'Failed to get account info'}
         equity = account_info['equity']
         
-        # Client Spec: 0.5% default; 1% only with bias alignment & normal volatility
-        base_risk = 0.005  # 0.5% default per client spec
+        # Client Spec: 0.5% default; 1% only with bias alignment & normal volatility (env-driven)
+        base_risk = float(os.getenv('BASE_RISK_PCT', str(NORMAL_RISK_PERCENTAGE)))
         
         # Get Asian range grade and confluence conditions
         grade = (self.current_session.asian_range_grade or 'NORMAL').upper()
@@ -910,15 +930,14 @@ class SignalDetectionService:
         # Risk percentage calculation per client spec
         # 1% only when: NORMAL grade + bias aligned + normal volatility
         if (grade == 'NORMAL' and bias_aligned and normal_volatility):
-            risk_pct = 0.01  # 1.0% when all conditions are met
+            risk_pct = float(os.getenv('MAX_RISK_PCT', '0.01'))  # e.g., 1.0%
         else:
-            risk_pct = base_risk  # 0.5% default for all other cases
-        
+            risk_pct = float(os.getenv('TIGHT_WIDE_RISK_PCT', str(base_risk)))
         # Client Spec: TIGHT and WIDE ranges should use reduced risk
         if grade in ['TIGHT', 'WIDE']:
-            risk_pct = base_risk  # Keep at 0.5%
+            risk_pct = float(os.getenv('TIGHT_WIDE_RISK_PCT', str(base_risk)))
         elif grade in ['NO_TRADE', 'EXTREME']:
-            risk_pct = base_risk * 0.5  # Even lower risk for extreme cases (0.25%)
+            risk_pct = float(os.getenv('EXTREME_RISK_PCT', str(base_risk * 0.5)))
         
         logger.info(f"Risk calculation: grade={grade}, bias_aligned={bias_aligned}, "
                    f"normal_vol={normal_volatility}, final_risk={risk_pct*100:.1f}%")
@@ -1608,7 +1627,7 @@ class SignalDetectionService:
             PnL: __ | Emotions: __ | Lessons: __
 
             BEHAVIOR
-            • If any gate fails, return “NO-TRADE” + exact reasons.
+            • If any gate fails, return "NO-TRADE" + exact reasons.
             • Use units where 1 pip = $0.10. Spread guard = 2.0 pips baseline.
             • Only propose setups during first half of the kill-zone; block first 3 minutes after session open.
             • Respond to event states: SWEPT (go/no-go), CONFIRMED (levels), ARMED expiry/filters fail (NO-TRADE), IN_TRADE at +0.5R or near timeout.
@@ -1800,50 +1819,48 @@ class SignalDetectionService:
             }
     
     def _calculate_sweep_threshold(self, asian_data: Dict) -> Dict:
-        """Calculate dynamic sweep threshold - Client Spec: max(10 pips, 7.5-10% of Asia range, 0.5×ATR(H1))"""
-        range_pips = asian_data['range_pips']
+        """Calculate dynamic sweep threshold - max(10 pips, 7.5-10% of Asia range, 0.5×ATR(H1)) using env-configurable values"""
+        range_pips = float(asian_data['range_pips'])
         symbol = os.getenv('DEFAULT_SYMBOL', 'XAUUSD')
         
         # Component 1: Floor (10 pips minimum)
-        floor_pips = float(os.getenv('SWEEP_THRESHOLD_FLOOR_PIPS', '10.0'))
+        floor_pips = float(os.getenv('SWEEP_THRESHOLD_FLOOR_PIPS', str(SWEEP_THRESHOLD_FLOOR_PIPS)))
         
-        # Component 2: Percentage of Asian range (7.5-10%, lean to 9-10% for XAU)
-        range_percentage = float(os.getenv('SWEEP_THRESHOLD_RANGE_PCT', '9.0')) / 100.0
-        percentage_pips = range_pips * range_percentage
+        # Component 2: Percentage of Asian range (prefer XAU-specific pct from env)
+        pct = float(os.getenv('SWEEP_THRESHOLD_PCT_XAU', str(SWEEP_THRESHOLD_PCT_XAU)))  # e.g., 0.09 for 9%
+        percentage_pips = range_pips * pct
         
-        # Component 3: ATR(H1) × 0.5 - CRITICAL MISSING COMPONENT
+        # Component 3: ATR(H1) × 0.5
         atr_h1_pips = 0.0
         try:
             end = timezone.now()
-            start = end - timedelta(hours=24)  # Get 24 hours of H1 data
+            start = end - timedelta(hours=24)
             h1_data = self.mt5_service.get_historical_data(symbol, 'H1', start, end)
-            if h1_data is not None and len(h1_data) >= 14:
-                atr_h1 = self._calculate_atr(h1_data, 14)
-                # Convert ATR to pips
+            if h1_data is not None and len(h1_data) >= ATR_H1_LOOKBACK:
+                atr_h1 = self._calculate_atr(h1_data, ATR_H1_LOOKBACK)
                 pip_multiplier = self._get_pip_multiplier(symbol)
-                atr_h1_pips = atr_h1 * pip_multiplier * 0.5  # 0.5 × ATR(H1)
+                atr_h1_pips = float(atr_h1) * float(pip_multiplier) * 0.5
         except Exception as e:
             logger.warning(f"Failed to calculate ATR(H1) for sweep threshold: {e}")
             atr_h1_pips = 0.0
         
         # Take the maximum of all three components
         threshold_pips = max(floor_pips, percentage_pips, atr_h1_pips)
+        chosen_component = (
+            'floor' if threshold_pips == floor_pips else
+            'range' if threshold_pips == percentage_pips else
+            'atr'
+        )
         
         # Return components for sweep creation and audit
         return {
-            'floor_pips': floor_pips,
-            'percentage_pips': percentage_pips,
-            'atr_threshold_pips': atr_h1_pips,
-            'atr_h1_pips': atr_h1_pips / 0.5 if atr_h1_pips > 0 else 0,  # Original ATR value
-            'threshold_pips': threshold_pips,
-            'chosen_component': 'floor' if threshold_pips == floor_pips else 
-                              'range' if threshold_pips == percentage_pips else 
-                              'atr' if threshold_pips == atr_h1_pips else 'unknown'
-                                  'percentage' if threshold_pips == percentage_pips else 'atr',
-                'final_threshold_pips': threshold_pips
-            }
-        
-        return round(threshold_pips, 1)
+            'floor_pips': round(floor_pips, 1),
+            'percentage_pips': round(percentage_pips, 1),
+            'atr_threshold_pips': round(atr_h1_pips, 1),
+            'atr_h1_pips': round(atr_h1_pips / 0.5, 1) if atr_h1_pips > 0 else 0,  # Original ATR value
+            'threshold_pips': round(threshold_pips, 1),
+            'chosen_component': chosen_component
+        }
     
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
         """Calculate Average True Range"""
