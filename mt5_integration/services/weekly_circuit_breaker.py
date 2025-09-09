@@ -15,6 +15,7 @@ from mt5_integration.utils.strategy_constants import WEEKLY_LOSS_LIMIT_R
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+_last_log_time: Dict[str, datetime] = {}
 
 
 class WeeklyCircuitBreakerService:
@@ -54,7 +55,13 @@ class WeeklyCircuitBreakerService:
                 logger.warning(f"Weekly circuit breaker triggered: {weekly_r:.2f}R loss >= {self.weekly_loss_limit_r}R limit")
                 result['message'] = f"Weekly circuit breaker active: {weekly_r:.2f}R loss exceeds {self.weekly_loss_limit_r}R limit"
             else:
-                logger.info(f"Weekly R tracking: {weekly_r:.2f}R (limit: -{self.weekly_loss_limit_r}R)")
+                # Throttle info logs to once per hour per symbol to reduce noise
+                key = str(session.symbol)
+                now = timezone.now()
+                last = _last_log_time.get(key)
+                if not last or (now - last).total_seconds() > 3600:
+                    logger.info(f"Weekly R tracking: {weekly_r:.2f}R (limit: -{self.weekly_loss_limit_r}R)")
+                    _last_log_time[key] = now
                 
             return result
             
